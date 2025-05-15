@@ -1,0 +1,143 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.model_selection import train_test_split
+from datetime import datetime
+
+# Simulate healthy and damaged data
+def generate_data(n_samples=500, anomaly_ratio=0.2):
+    healthy = np.random.normal(loc=0.0, scale=1.0, size=(int(n_samples * (1 - anomaly_ratio)), 100))
+    damaged = np.random.normal(loc=3.0, scale=1.5, size=(int(n_samples * anomaly_ratio), 100))
+    data = np.vstack([healthy, damaged])
+    labels = np.array([0] * healthy.shape[0] + [1] * damaged.shape[0])
+    return data, labels
+
+# Feature extraction
+def extract_features(data):
+    feature_list = []
+    for signal in data:
+        features = {
+            'mean': np.mean(signal),
+            'std': np.std(signal),
+            'rms': np.sqrt(np.mean(signal**2)),
+            'kurtosis': pd.Series(signal).kurt(),
+            'skewness': pd.Series(signal).skew()
+        }
+        feature_list.append(features)
+    return pd.DataFrame(feature_list)
+
+# Simulate streaming data
+def simulate_streaming_data(n_events=5):
+    return [np.random.normal(loc=np.random.choice([0.0, 3.0], p=[0.8, 0.2]), scale=1.2, size=100)
+            for _ in range(n_events)]
+
+# Event detection
+def is_event(signal, threshold=2.5):
+    return np.sqrt(np.mean(signal**2)) > threshold
+
+# Train model
+X_raw, y = generate_data()
+X_features = extract_features(X_raw)
+X_train, X_test, y_train, y_test = train_test_split(X_features, y, test_size=0.3, random_state=42)
+
+# Scaling
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Online-capable classifier
+clf = SGDClassifier(loss='log_loss', random_state=42)
+clf.partial_fit(X_train_scaled, y_train, classes=np.unique(y))
+
+# Initial evaluation
+y_pred = clf.predict(X_test_scaled)
+initial_report = classification_report(y_test, y_pred, output_dict=True)
+conf_matrix = confusion_matrix(y_test, y_pred)
+accuracy = accuracy_score(y_test, y_pred)
+
+# Real-time prediction
+event_data = simulate_streaming_data(n_events=10)
+event_outputs = []
+
+correct = 0
+total = 0
+accuracy_trend = []
+
+for i, signal in enumerate(event_data):
+    rms = np.sqrt(np.mean(signal**2))
+    if is_event(signal):
+        features = extract_features([signal])
+        features_scaled = scaler.transform(features)
+        prediction = clf.predict(features_scaled)[0]
+        true_label = 1 if np.mean(signal) > 1.5 else 0
+
+        # Accuracy tracking
+        total += 1
+        if prediction == true_label:
+            correct += 1
+        running_accuracy = correct / total
+        accuracy_trend.append({'event_id': i + 1, 'running_accuracy': running_accuracy})
+
+        # Store result
+        event_outputs.append({
+            'event_id': i + 1,
+            'rms': round(rms, 2),
+            'predicted': 'DAMAGED' if prediction else 'HEALTHY',
+            'actual': 'DAMAGED' if true_label else 'HEALTHY'
+        })
+
+        # Online learning
+        clf.partial_fit(features_scaled, [true_label])
+    else:
+        event_outputs.append({
+            'event_id': i + 1,
+            'rms': round(rms, 2),
+            'predicted': 'NO ACTION',
+            'actual': 'N/A'
+        })
+
+# Convert to DataFrame
+event_df = pd.DataFrame(event_outputs)
+historical_rms = pd.DataFrame({'event_id': range(1, len(X_test) + 1),
+                                'rms': X_test['rms'].values,
+                                'event_type': 'Historical',
+                                'true_label': y_test,
+                                'predicted_label': y_pred})
+
+realtime_df = event_df[event_df['predicted'] != 'NO ACTION'].copy()
+realtime_df['true_label'] = realtime_df['actual'].map({'HEALTHY': 0, 'DAMAGED': 1})
+realtime_df['predicted_label'] = realtime_df['predicted'].map({'HEALTHY': 0, 'DAMAGED': 1})
+realtime_df['event_type'] = 'Real-time'
+
+comparison_df = pd.concat([
+    historical_rms[['event_id', 'rms', 'event_type', 'true_label']],
+    realtime_df[['event_id', 'rms', 'event_type', 'true_label']]
+], ignore_index=True)
+
+plt.figure(figsize=(12, 6))
+sns.scatterplot(data=comparison_df, x='event_id', y='rms', hue='event_type', style='true_label', s=100)
+plt.axhline(2.5, color='red', linestyle='--', label='RMS Threshold')
+plt.title("RMS Comparison: Historical vs Real-Time Events")
+plt.xlabel("Event ID")
+plt.ylabel("RMS Value")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+accuracy_df = pd.DataFrame(accuracy_trend)
+plt.figure(figsize=(10, 5))
+sns.lineplot(data=accuracy_df, x='event_id', y='running_accuracy', marker='o')
+plt.ylim(0, 1.05)
+plt.title("Running Accuracy Over Real-Time Events")
+plt.xlabel("Event ID")
+plt.ylabel("Accuracy")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+print("\nEvent Prediction Table:\n", event_df)
+print("\nInitial Model Report:\n", classification_report(y_test, y_pred))
+print("\nConfusion Matrix:\n", conf_matrix)
+print("\nAccuracy Score:", accuracy)
